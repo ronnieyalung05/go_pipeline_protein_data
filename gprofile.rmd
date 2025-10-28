@@ -19,7 +19,7 @@ library(plotly)
 ```{r}
 # assume you already have: protein_data_normalized from "Protein_Data_Pipeline_And_Analysis.rmd"
 gpr_data_all <- protein_data_normalized %>%
-  select(where(is.numeric), GeneSymbol)
+  dplyr::select(where(is.numeric), GeneSymbol)
 
 # get the names of numeric columns
 numeric_cols_gpr <- names(gpr_data_all)[sapply(gpr_data_all, is.numeric)]
@@ -27,9 +27,9 @@ numeric_cols_gpr <- names(gpr_data_all)[sapply(gpr_data_all, is.numeric)]
 # create a list of dataframes removing all 0 values in each column and putting in desc order
 gpr_protein_list <- lapply(numeric_cols_gpr, function(colname) {
   gpr_data_all %>%
-    select(all_of(colname), GeneSymbol) %>%
+    dplyr::select(all_of(colname), GeneSymbol) %>%
     filter(.data[[colname]] != 0) %>%
-    arrange(desc(.data[[colname]]))
+    arrange(dplyr::desc(.data[[colname]]))
 })
 
 # name each element in the list by its column
@@ -185,7 +185,7 @@ run_pca_on_gost <- function(gost_results) {
   # Filter only that source
   df_filtered <- df %>%
     filter(source == source_used) %>%
-    select(term_name, p_value)
+    dplyr::select(term_name, p_value)
   
   # Transform p-values (so smaller p => larger number)
   df_filtered <- df_filtered %>%
