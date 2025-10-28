@@ -1,97 +1,222 @@
+---
+title: 'gprofiler: heatmap'
+author: "Ronnie Yalung"
+output:
+  html_document: default
+  pdf_document: default
+---
+
 ```{r}
-# ----------------------------
-# 2. Clean accession/entry names
-# ----------------------------
-protein_data_clean <- protein_data_normalized %>%
-  mutate(
-    # Remove any " (+1)" or similar scaffold suffix
-    AccessionClean = str_remove(`Accession Number`, "\\s*\\(\\+.*\\)"),
+library(gprofiler2)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(plotly)
+```
 
-    # Extract UniProtID if present (middle piece)
-    UniProtID = str_extract(AccessionClean, "(?<=\\|)[A-Z0-9]+(?=\\|)"),
+# Data engineering/altering/filtering
 
-    # Extract entry name (right-hand piece)
-    EntryName = str_extract(AccessionClean, "[A-Z0-9_]+(?=\\|?$)"),
+```{r}
+# assume you already have: protein_data_normalized from "Protein_Data_Pipeline_And_Analysis.rmd"
+gpr_data_all <- protein_data_normalized %>%
+  select(where(is.numeric), GeneSymbol)
 
-    # Use UniProtID if available, else entry name
-    QueryID = if_else(!is.na(UniProtID), UniProtID, EntryName),
+# get the names of numeric columns
+numeric_cols_gpr <- names(gpr_data_all)[sapply(gpr_data_all, is.numeric)]
 
-    # Extract species from entry name suffix (e.g., _HUMAN, _BOVIN)
-    Species = str_extract(QueryID, "_[A-Z]+$") %>% str_remove("^_"),
+# create a list of dataframes removing all 0 values in each column and putting in desc order
+gpr_protein_list <- lapply(numeric_cols_gpr, function(colname) {
+  gpr_data_all %>%
+    select(all_of(colname), GeneSymbol) %>%
+    filter(.data[[colname]] != 0) %>%
+    arrange(desc(.data[[colname]]))
+})
 
-    # Create Gene symbol for human/mouse/bovine (strip species suffix)
-    GeneSymbol = str_remove(QueryID, "_[A-Z]+$")
-  )
+# name each element in the list by its column
+names(gpr_protein_list) <- numeric_cols_gpr
+```
 
-# ----------------------------
-# 3. Split by species
-# ----------------------------
-species_list <- unique(protein_data_clean$Species)
-cat("Species detected:\n")
-print(species_list)
-
-# Prepare list to store results
-go_results_list <- list()
-
-# ----------------------------
-# 4. Fetch GO annotations per species
-# ----------------------------
-for (sp in species_list) {
+# Function for gost results
+```{r}
+run_gost_from_input <- function(g_protein_list) {
+  # Step 1: show available protein names
+  cat("Available proteins:\n")
+  print(names(g_protein_list))
   
-  # Map gprofiler organism code
-  organism_code <- case_when(
-    sp == "HUMAN" ~ "hsapiens",
-    sp == "BOVIN" ~ "btaurus",
-    sp == "MOUSE" ~ "mmusculus",
-    TRUE ~ NA_character_
-  )
+  # Step 2: ask for user input
+  protein_input <- readline(prompt = "\nEnter ONE protein name from the list above: ")
   
-  # Skip unknown species
-  if (is.na(organism_code)) next
-  
-  # Get gene symbols for this species
-  genes_sp <- protein_data_clean %>%
-    filter(Species == sp) %>%
-    pull(GeneSymbol) %>%
-    unique()
-  
-  # Fetch GO annotations
-  gost_sp <- gost(
-    query = genes_sp,
-    organism = organism_code,
-    sources = c("GO:BP", "GO:MF", "GO:CC")
-  )
-  
-  # Store only the result table with the species column
-  if (!is.null(gost_sp$result)) {
-    go_results_list[[sp]] <- gost_sp$result %>%
-      mutate(Species = sp)
+  # Step 3: validate protein name
+  if (!(protein_input %in% names(g_protein_list))) {
+    stop(paste0("Error: '", protein_input, "' is not a valid protein name.\n",
+                "Valid options are: ", paste(names(g_protein_list), collapse = ", ")))
   }
+  
+  # Step 4: ask for source input (comma-separated)
+  cat("\nAvailable sources include: GO:BP, GO:MF, GO:CC, KEGG, REAC, WP, CORUM, TF, MIRNA, HPA, HP\n")
+  source_input <- readline(prompt = "Enter one or more sources (comma-separated): ")
+  
+  # Parse the source input into a character vector
+  sources <- trimws(strsplit(source_input, ",")[[1]])
+  
+  # Step 5: validate at least one source, CAN CHANGE SOURCES HERE
+  valid_sources <- c("GO:BP", "GO:MF", "GO:CC", "KEGG", "REAC", "WP", "CORUM", "TF", "MIRNA", "HPA", "HP")
+  if (!all(sources %in% valid_sources)) {
+    invalid <- sources[!sources %in% valid_sources]
+    stop(paste0("Invalid source(s): ", paste(invalid, collapse = ", "),
+                "\nValid options are: ", paste(valid_sources, collapse = ", ")))
+  }
+  
+  # Step 6: retrieve the gene symbols for that protein
+  gpr_filter_df <- g_protein_list[[protein_input]]
+  gpr_list <- list(gpr_filter_df$GeneSymbol)
+  
+  # Step 7: run gprofiler2::gost
+  # --- Nested safe_gost function (retry logic) ---
+  safe_gost <- function(query, sources, max_attempts = 3) {
+    for (i in 1:max_attempts) {
+      result <- try(
+        gost(
+          query = query,
+          organism = "hsapiens",
+          ordered_query = TRUE,
+          significant = TRUE,
+          sources = sources
+        ),
+        silent = TRUE
+      )
+      if (!inherits(result, "try-error") && !is.null(result)) {
+        return(result)
+      }
+      cat("Attempt", i, "failed — retrying in 2 seconds...\n")
+      Sys.sleep(2)
+    }
+    stop("g:Profiler request failed after multiple attempts (API doesn't always work. Maybe retry.)")
+  }
+  
+  # Step 7: run gost safely
+  gost_results <- safe_gost(gpr_list, sources)
+  
+  # Step 8: return results
+  cat("\n✅ g:Profiler analysis complete!\n")
+  return(gost_results)
 }
+```
 
-# ----------------------------
-# 5. Combine all species results
-# ----------------------------
-go_results_combined <- bind_rows(go_results_list)
+# RUN FUNCTION
+```{r}
+# get gost results using function
+gost_results <- run_gost_from_input(gpr_protein_list)
+```
 
-# ----------------------------
-# 6. Merge back with protein expression data
-# ----------------------------
-df_with_go <- protein_data_clean %>%
-  left_join(go_results_combined %>%
-              select(query, term_id, term_name, source, Species),
-            by = c("GeneSymbol" = "query", "Species" = "Species"))
+
+
+# Data analysis
+
+# GOST PLOT
+```{r}
+# Run for gost plot
+gostplot(gost_results, capped=TRUE, interactive=TRUE)
+```
+
+# HEATMAP
+```{r}
+# Run (this cell and onwards) for heatmap  (term_name and p-value)
+
+# Extract result table
+g_res <- gost_results$result
+```
+
+# Functions to run on the data (top N significant terms and -log10 the p values)
+```{r}
+# Optional, simplify p-values: use -log10 transform for visualization (0.1 = 1, 0.01 = 2, 0.001 = 3, etc)
+g_res <- g_res %>%
+  mutate(neg_log_p = -log10(p_value))
+
+# Optionally, take top N most significant terms
+top_terms <- g_res %>%
+  arrange(p_value) %>%
+  slice_head(n = 30)
 ```
 
 ```{r}
-# ----------------------------
-# 7. Example: Prompt user for a GO term to filter
-# ----------------------------
-term <- readline(prompt = "Enter GO term ID (e.g., GO:0003723): ")
-
-filtered_df <- df_with_go %>%
-  filter(term_id == term)
-
-cat("Filtered proteins matching GO term", term, ":\n")
-print(filtered_df)
+# replace g_res with top_terms, replace p_value with neg_log_p
+ggplot(top_terms, aes(x = source, y = reorder(term_name, neg_log_p), fill = neg_log_p)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(
+    title = "Top Enriched Terms",
+    x = "Source",
+    y = "Term Name",
+    fill = "p-value" #-log10(p-value)
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),
+    plot.title = element_text(hjust = 0.5)
+  )
 ```
+
+
+
+# PCA (not entirely sure what im doing/looking for here)
+```{r}
+# for pca
+run_pca_on_gost <- function(gost_results) {
+  # Check that the result object exists
+  if (is.null(gost_results$result)) {
+    stop("No valid results found in gost_results.")
+  }
+  
+  # Extract data
+  df <- gost_results$result
+  
+  # Automatically detect which source was used (only one should exist)
+  source_used <- unique(df$source)
+  
+  if (length(source_used) != 1) {
+    warning(paste("Multiple sources found:", paste(source_used, collapse = ", "),
+                  "\nDefaulting to first:", source_used[1]))
+    source_used <- source_used[1]
+  }
+  
+  cat(paste0("Running PCA on source: ", source_used, "\n"))
+  
+  # Filter only that source
+  df_filtered <- df %>%
+    filter(source == source_used) %>%
+    select(term_name, p_value)
+  
+  # Transform p-values (so smaller p => larger number)
+  df_filtered <- df_filtered %>%
+    mutate(log_pval = -log10(p_value))
+  
+  # PCA requires numeric columns — here we only have one numeric (log_pval),
+  # so we can’t really "rotate" dimensions. Instead, we’ll simulate
+  # multiple features by adding term index or dummy noise (optional).
+  # This helps visualize term variance.
+  df_filtered <- df_filtered %>%
+    mutate(term_index = seq_along(term_name))
+  
+  # Run PCA
+  pca_res <- prcomp(df_filtered[, c("log_pval", "term_index")], scale. = TRUE)
+  
+  # Prepare dataframe for plotting
+  pca_df <- as.data.frame(pca_res$x)
+  pca_df$term_name <- df_filtered$term_name
+  
+  # Plot PCA results
+  plot <- ggplot(pca_df, aes(x = PC1, y = PC2, label = term_name)) +
+    geom_point(color = "steelblue", size = 3) +
+    # geom_text(vjust = 1.5, size = 3) +
+    labs(title = paste("PCA of", source_used, "terms from g:Profiler. Note: smaller p => larger number"),
+         x = "Principal Component 1", y = "Principal Component 2") +
+    theme_minimal()
+  ggplotly(plot, tooltip = "text")
+}
+```
+
+```{r}
+run_pca_on_gost(gost_results)
+```
+## GOSemSim
