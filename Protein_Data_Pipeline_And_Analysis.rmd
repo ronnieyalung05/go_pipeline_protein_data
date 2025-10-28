@@ -38,6 +38,7 @@ library(ggplot2)
 library(ggVennDiagram)
 library(plotly)
 library(ComplexUpset)
+library(stats)
 ```
 
 ### BEFORE EXECUTING ANY FURTHER CODE CELLS, FIRST LOAD THE FUNCTIONS FROM `pipeline_functions.rmd`, `filter_functions.rmd`, AND `data_analysis_functions.rmd` INTO R's GLOBAL ENV (EXECUTE THE CODE CELL(S) IN THE RESPECTIVE FILES).
@@ -48,23 +49,23 @@ print("Note: File format HAS to be in .xlsx, as R can't read the raw .xls Scaffo
       Microsoft Excel, then Save As an Excel Workbook (.xlsx) in the File Format options.")
 
 xlsx_path <- as.character(readline(prompt = "Enter the path to your .xlsx file: "))
-protein_data <- read_excel(path=xlsx_path, skip=3) # skip=3 to omit the description rows
+protein_data_raw <- read_excel(path=xlsx_path, skip=3) # skip=3 to omit the description rows
 
 # Remove rows where the # column is a NA
-protein_data <- protein_data[!is.na(protein_data$`#`), ]
+protein_data_raw <- protein_data_raw[!is.na(protein_data_raw$`#`), ]
 
 # ------
 # Prep and clean data: remove unneccessary columns, normalize the data. (run once)
 # ------
   
 # Find the column number of 'Taxonomy' (Assuming all of the numeric data is after 'Taxonomy' column)
-taxonomy_col <- which(colnames(protein_data) == "Taxonomy")
+taxonomy_col <- which(colnames(protein_data_raw) == "Taxonomy")
 
 # All columns after Taxonomy are numeric samples
-sample_cols <- (taxonomy_col + 1):ncol(protein_data)
+sample_cols <- (taxonomy_col + 1):ncol(protein_data_raw)
 
 # Create a new data frame with normalized values
-protein_data_normalized <- protein_data %>%
+protein_data_normalized <- protein_data_raw %>%
   mutate(across(all_of(sample_cols), ~ if_else(. == 0, 0, log2(.)))) # if value = 0, don't "log2 it", as that would result in a disruptive value (-Inf)
 
 protein_data_normalized <- protein_data_normalized %>% dplyr::select(-c(`Molecular Weight`, `Taxonomy`, `Visible?`, `Starred?`,
@@ -138,6 +139,7 @@ Running the next cell will allow you to filter proteins into two new datasets: `
 
 # Run function + Prepare data analysis df as `df_numeric`.
 ```{r}
+# Runs the the GO filter function, and then creates the numeric dataframe associated with the filtered data 
 # `protein_data_with_go` is the dataset with go_terms (and already normalized numeric data)
 filtered_proteins <- run_go_filter(protein_data_with_go)
 
@@ -165,12 +167,12 @@ After running this cell, you can perform further protein filtering using the `fi
 
 ```{r}
 # Can name the new df anything you want (below is example)
-TESTdf <- filter_numeric_protein_data(df_numeric, top_n_genes=50)
+test_filtered <- filter_numeric_protein_data(df_numeric)
 ```
 
 ```{r}
 # Assuming df_numeric is your dataframe with rownames = GeneSymbols
-heatmap_plot <- plot_interactive_protein_heatmap(TESTdf,
+heatmap_plot <- plot_interactive_protein_heatmap(test_filtered,
                                                  cluster_rows = FALSE,
                                                  cluster_columns = FALSE,
                                                  tooltip_precision = 3)
@@ -181,5 +183,62 @@ heatmap_plot
 
 ```{r}
 # Will prompt user
-plot_protein_venn(TESTdf)
+plot_protein_venn(test_filtered)
+```
+
+# for pca (not entirely sure what im doing/looking for here)
+```{r}
+# for pca
+run_pca <- function(df, transpose = FALSE, interactive = TRUE, label_points = FALSE) {
+  # --- Step 1: ensure numeric matrix ---
+  if (!is.matrix(df)) {
+    df <- as.data.frame(df)
+  }
+  
+  # If first column is character (gene/protein names), use as rownames
+  if (is.character(df[[1]])) {
+    rownames(df) <- df[[1]]
+    df <- df[, -1]
+  }
+  
+  # Ensure numeric
+  df <- as.matrix(df)
+  mode(df) <- "numeric"
+  
+  # --- Step 2: optionally transpose ---
+  if (transpose) {
+    df <- t(df)
+  }
+  
+  # --- Step 3: run PCA ---
+  pca_res <- prcomp(df, scale. = TRUE)
+  pca_df <- as.data.frame(pca_res$x)
+  pca_df$Label <- rownames(df)
+  
+  # --- Step 4: create ggplot ---
+  p <- ggplot(pca_df, aes(x = PC1, y = PC2)) +
+    geom_point(color = "steelblue", size = 3) +
+    labs(title = "PCA Plot", x = "PC1", y = "PC2") +
+    theme_minimal()
+  
+  # Add labels if requested
+  if (label_points) {
+    p <- p + geom_text(aes(label = Label), vjust = 1.5, size = 3)
+  }
+  
+  # --- Step 5: interactive or static ---
+  if (interactive) {
+    p <- ggplotly(p, tooltip = "Label")
+  }
+  
+  return(p)
+}
+
+
+```
+
+```{r}
+
+p <- run_pca(test_filtered, transpose = FALSE, interactive = TRUE, label_points = FALSE)
+p
 ```
